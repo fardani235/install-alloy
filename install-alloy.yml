@@ -1,0 +1,189 @@
+---
+- name: Install Grafana Alloy
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    alloy_package_name: alloy
+    alloy_repo_key_url: https://apt.grafana.com/gpg.key
+    alloy_repo_key_path: /etc/apt/keyrings/grafana.gpg
+    alloy_repo_definition: "deb [signed-by={{ alloy_repo_key_path }}] https://apt.grafana.com stable main"
+    alloy_user: alloy
+    alloy_group: alloy
+    alloy_config_dir: /etc/alloy
+    alloy_config_path: /etc/alloy/config.alloy
+    alloy_storage_path: /var/lib/alloy
+    alloy_http_listen_addr: 0.0.0.0:12345
+    alloy_grpc_listen_addr: 127.0.0.1:12346
+    alloy_log_level: info
+    alloy_log_format: logfmt
+    alloy_scrape_interval: 30s
+    alloy_instance_label: "{{ inventory_hostname }}"
+    alloy_prometheus_remote_write_url: ""
+    alloy_prometheus_username: ""
+    alloy_prometheus_password: ""
+    alloy_loki_write_url: ""
+    alloy_loki_username: ""
+    alloy_loki_password: ""
+    alloy_scrape_targets:
+      - name: fail2ban_exporter
+        address: 127.0.0.1:9101
+        job: fail2ban_exporter
+      - name: mysqld_exporter
+        address: 127.0.0.1:9104
+        job: mysqld_exporter
+    alloy_file_log_paths:
+      - path: /var/log/syslog
+        job: syslog
+      - path: /var/log/auth.log
+        job: auth
+      - path: /home/techmaju/frappe-bench/logs/*.log
+        job: frappe
+
+  pre_tasks:
+    - name: Ensure the host uses a Debian-family distribution
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "Debian"
+        fail_msg: "install_grafana_alloy.yml currently supports Debian-family hosts only."
+
+  tasks:
+    - name: Install APT prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - gpg
+        state: present
+        update_cache: true
+
+    - name: Ensure Grafana APT keyring directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Grafana APT signing key
+      ansible.builtin.get_url:
+        url: "{{ alloy_repo_key_url }}"
+        dest: /tmp/grafana-apt.key
+        mode: "0644"
+
+    - name: Convert Grafana APT signing key to keyring format
+      ansible.builtin.command:
+        argv:
+          - gpg
+          - --dearmor
+          - --yes
+          - --output
+          - "{{ alloy_repo_key_path }}"
+          - /tmp/grafana-apt.key
+
+    - name: Add Grafana APT repository
+      ansible.builtin.apt_repository:
+        repo: "{{ alloy_repo_definition }}"
+        filename: grafana
+        state: present
+      register: grafana_repo
+
+    - name: Install Grafana Alloy package
+      ansible.builtin.apt:
+        name: "{{ alloy_package_name }}"
+        state: present
+        update_cache: "{{ grafana_repo.changed }}"
+
+    - name: Ensure Alloy group exists
+      ansible.builtin.group:
+        name: "{{ alloy_group }}"
+        system: true
+        state: present
+
+    - name: Ensure Alloy user exists
+      ansible.builtin.user:
+        name: "{{ alloy_user }}"
+        group: "{{ alloy_group }}"
+        home: "{{ alloy_storage_path }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+        state: present
+
+    - name: Ensure Alloy configuration directory exists
+      ansible.builtin.file:
+        path: "{{ alloy_config_dir }}"
+        state: directory
+        owner: root
+        group: "{{ alloy_group }}"
+        mode: "0750"
+
+    - name: Ensure Alloy storage directory exists
+      ansible.builtin.file:
+        path: "{{ alloy_storage_path }}"
+        state: directory
+        owner: "{{ alloy_user }}"
+        group: "{{ alloy_group }}"
+        mode: "0750"
+
+    - name: Deploy Grafana Alloy configuration
+      ansible.builtin.template:
+        src: templates/alloy-config.alloy.j2
+        dest: "{{ alloy_config_path }}"
+        owner: root
+        group: "{{ alloy_group }}"
+        mode: "0640"
+      notify: Restart Grafana Alloy
+
+    - name: Install Grafana Alloy systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/alloy.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Grafana Alloy
+          Documentation=https://grafana.com/docs/alloy/latest/
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ alloy_user }}
+          Group={{ alloy_group }}
+          ExecStart=/usr/bin/alloy run \
+            --storage.path={{ alloy_storage_path }} \
+            --server.http.listen-addr={{ alloy_http_listen_addr }} \
+            --server.grpc.listen-addr={{ alloy_grpc_listen_addr }} \
+            {{ alloy_config_path }}
+          Restart=on-failure
+          RestartSec=5
+          NoNewPrivileges=true
+          ProtectSystem=full
+          ProtectHome=true
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - Reload systemd
+        - Restart Grafana Alloy
+
+    - name: Flush handlers before enabling service
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Grafana Alloy service is enabled and started
+      ansible.builtin.systemd:
+        name: alloy
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart Grafana Alloy
+      ansible.builtin.systemd:
+        name: alloy
+        state: restarted
