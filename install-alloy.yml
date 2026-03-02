@@ -12,9 +12,9 @@
     alloy_group: alloy
     alloy_config_dir: /etc/alloy
     alloy_config_path: /etc/alloy/config.alloy
+    alloy_env_file: /etc/default/alloy
     alloy_storage_path: /var/lib/alloy
     alloy_http_listen_addr: 0.0.0.0:12345
-    alloy_grpc_listen_addr: 127.0.0.1:12346
     alloy_log_level: info
     alloy_log_format: logfmt
     alloy_scrape_interval: 30s
@@ -134,37 +134,21 @@
         mode: "0640"
       notify: Restart Grafana Alloy
 
-    - name: Install Grafana Alloy systemd service
+    - name: Configure Grafana Alloy defaults
       ansible.builtin.copy:
-        dest: /etc/systemd/system/alloy.service
+        dest: "{{ alloy_env_file }}"
         owner: root
         group: root
         mode: "0644"
         content: |
-          [Unit]
-          Description=Grafana Alloy
-          Documentation=https://grafana.com/docs/alloy/latest/
-          Wants=network-online.target
-          After=network-online.target
+          CONFIG_FILE={{ alloy_config_path }}
+          CUSTOM_ARGS="--storage.path={{ alloy_storage_path }} --server.http.listen-addr={{ alloy_http_listen_addr }}"
+      notify: Restart Grafana Alloy
 
-          [Service]
-          Type=simple
-          User={{ alloy_user }}
-          Group={{ alloy_group }}
-          ExecStart=/usr/bin/alloy run \
-            --storage.path={{ alloy_storage_path }} \
-            --server.http.listen-addr={{ alloy_http_listen_addr }} \
-            --server.grpc.listen-addr={{ alloy_grpc_listen_addr }} \
-            {{ alloy_config_path }}
-          Restart=on-failure
-          RestartSec=5
-          NoNewPrivileges=true
-          ProtectSystem=full
-          ProtectHome=true
-          LimitNOFILE=65536
-
-          [Install]
-          WantedBy=multi-user.target
+    - name: Remove custom Alloy systemd unit override if present
+      ansible.builtin.file:
+        path: /etc/systemd/system/alloy.service
+        state: absent
       notify:
         - Reload systemd
         - Restart Grafana Alloy
